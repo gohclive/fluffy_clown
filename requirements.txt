@@ -1,0 +1,13 @@
+beautifulsoup4==4.12.3
+exceptiongroup==1.2.2
+load-dotenv==0.1.0
+python-dotenv==1.0.1
+requests==2.32.3
+selenium==4.27.1
+typing_extensions==4.12.2
+urllib3==2.3.0
+webdriver-manager==4.0.2
+webencodings==0.5.1
+websocket-client==1.8.0
+# Logging and error handling
+rich==13.7.0
