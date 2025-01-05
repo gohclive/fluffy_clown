@@ -8,6 +8,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
+from selenium.webdriver.common.action_chains import ActionChains
 from dotenv import load_dotenv
 import os
 import sys
@@ -25,12 +26,12 @@ logger = logging.getLogger(__name__)
 
 
 class CasioCheckoutAutomation:
-    def __init__(self, product_url: str, headless: bool = False, keep_browser_open: bool = True):
+    def __init__(self, product_url: str, headless: bool = False, keep_browser_open: bool = False):
         self.product_url = product_url
         self.driver = None
         self.headless = headless
         self.keep_browser_open = keep_browser_open
-        self.error_occurred = False
+        self.error_occurred = True
         self._load_environment()
 
     def _load_environment(self) -> None:
@@ -73,18 +74,6 @@ class CasioCheckoutAutomation:
             options.add_argument('--lang=en-US')
             options.add_argument('--disable-gpu')
 
-            # Add window size randomization
-            window_sizes = [
-                (1920, 1080),
-                (1366, 768),
-                (1536, 864),
-                (1440, 900),
-                (1280, 720)
-            ]
-            window_size = random.choice(window_sizes)
-            options.add_argument(
-                f"--window-size={window_size[0]},{window_size[1]}")
-
             if self.headless:
                 options.add_argument("--headless=new")
 
@@ -108,19 +97,21 @@ class CasioCheckoutAutomation:
                 });
             """)
 
-            # Set random viewport
-            self.driver.execute_cdp_cmd('Emulation.setDeviceMetricsOverride', {
-                'mobile': False,
-                'width': window_size[0],
-                'height': window_size[1],
-                'deviceScaleFactor': 1,
-            })
-
             self.driver.implicitly_wait(5)
 
         except Exception as e:
             logger.error(f"Failed to initialize WebDriver: {str(e)}")
             raise
+
+    def _scroll_to_element(self, element) -> None:
+        """Scroll element into view."""
+        try:
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                element
+            )
+        except Exception as e:
+            logger.warning(f"Error during scrolling: {str(e)}")
 
     def _wait_and_click(self, by: By, selector: str, timeout: int = 10) -> bool:
         """Wait for element and click with retry logic."""
@@ -128,6 +119,24 @@ class CasioCheckoutAutomation:
             element = WebDriverWait(self.driver, timeout).until(
                 EC.element_to_be_clickable((by, selector))
             )
+
+            # Check if element is visible in viewport
+            is_visible = self.driver.execute_script("""
+                var elem = arguments[0],
+                    box = elem.getBoundingClientRect(),
+                    cx = box.left + box.width / 2,
+                    cy = box.top + box.height / 2,
+                    e = document.elementFromPoint(cx, cy);
+                for (; e; e = e.parentElement) {
+                    if (e === elem)
+                        return true;
+                }
+                return false;
+            """, element)
+
+            if not is_visible:
+                self._scroll_to_element(element)
+
             retries = 3
             while retries > 0:
                 try:
@@ -278,10 +287,9 @@ class CasioCheckoutAutomation:
             return False
 
     def fill_checkout_details(self) -> bool:
-        """Fill checkout form details."""
+        """Fill checkout form details with smart scrolling."""
         try:
             logger.info("Filling checkout details...")
-            # Fill address details
             form_fields = {
                 "telephone": os.getenv('PHONE'),
                 "postcode": os.getenv('POSTCODE'),
@@ -289,37 +297,193 @@ class CasioCheckoutAutomation:
                 "street[1]": os.getenv('STREET2')
             }
 
+            def is_in_viewport(element):
+                return self.driver.execute_script("""
+                    var rect = arguments[0].getBoundingClientRect();
+                    return (rect.top >= 0 && rect.bottom <= window.innerHeight);
+                """, element)
+
+            def smart_scroll(element):
+                if not is_in_viewport(element):
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                        element
+                    )
+
+            # Fill form fields
             for field, value in form_fields.items():
-                if not self._fill_form_field(By.NAME, field, value):
+                try:
+                    element = WebDriverWait(self.driver, 10).until(
+                        EC.presence_of_element_located((By.NAME, field))
+                    )
+                    smart_scroll(element)
+                    element.clear()
+                    element.send_keys(value)
+
+                    if element.get_attribute('value') != value:
+                        raise ValueError(
+                            f"Value verification failed for {field}")
+
+                except Exception as e:
+                    logger.error(f"Failed to fill {field}: {str(e)}")
                     return False
 
-            # Proceed to next step
-            return self._wait_and_click(
-                By.CSS_SELECTOR,
-                "button[data-role='opc-continue']"
-            )
+            # Handle continue button
+            try:
+                button = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "button[data-role='opc-continue']"))
+                )
+                smart_scroll(button)
+
+                WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable(
+                        (By.CSS_SELECTOR, "button[data-role='opc-continue']"))
+                ).click()
+
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to click continue: {str(e)}")
+                return False
+
         except Exception as e:
-            logger.error(f"Error in fill_checkout_details: {str(e)}")
+            logger.error(f"Error in checkout details: {str(e)}")
             return False
 
     def handle_payment(self) -> bool:
-        """Handle payment form filling."""
+        """Handle Stripe Elements payment form using JavaScript injection."""
         try:
-            logger.info("Filling payment details...")
-            payment_fields = {
-                "Field-numberInput": os.getenv('CARD_NUMBER'),
-                "Field-expiryInput": os.getenv('CARD_EXPIRY'),
-                "Field-cvcInput": os.getenv('CARD_CVC')
-            }
+            logger.info("Starting payment process...")
 
-            for field_id, value in payment_fields.items():
-                if not self._fill_form_field(By.ID, field_id, value):
-                    return False
+            # Handle billing checkbox
+            try:
+                checkbox = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located(
+                        (By.ID, "billing-address-same-as-shipping-stripe_payments"))
+                )
+                if not checkbox.is_selected():
+                    self.driver.execute_script("""
+                        var checkbox = arguments[0];
+                        checkbox.checked = true;
+                        checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    """, checkbox)
+                time.sleep(1)
+                logger.info("Billing checkbox handled")
+            except Exception as e:
+                logger.warning(f"Billing checkbox handling failed: {str(e)}")
 
-            return True
+            # Find and switch to Stripe iframe
+            stripe_iframe = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//iframe[contains(@name, '__privateStripeFrame')]"))
+            )
+            self.driver.switch_to.frame(stripe_iframe)
+            logger.info("Switched to Stripe iframe")
+            time.sleep(2)
+
+            try:
+                # Function to simulate typing with JavaScript
+                def simulate_typing(element, text, delay=100):
+                    """Simulate typing using JavaScript with delays."""
+                    for char in text:
+                        self.driver.execute_script("""
+                            var element = arguments[0];
+                            var char = arguments[1];
+                            element.value += char;
+                            element.dispatchEvent(new Event('input', { bubbles: true }));
+                            element.dispatchEvent(new KeyboardEvent('keydown', { key: char }));
+                            element.dispatchEvent(new KeyboardEvent('keypress', { key: char }));
+                            element.dispatchEvent(new KeyboardEvent('keyup', { key: char }));
+                        """, element, char)
+                        time.sleep(delay/1000)  # Convert ms to seconds
+
+                # Card Number Field
+                card_input = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.XPATH,
+                                                    "/html/body/div[1]/div/div/div[1]/div/div/div/div/div/div/form/div/div/div[1]/div/div[1]/div/div[1]/input"))
+                )
+                card_input.click()
+                simulate_typing(card_input, os.getenv('CARD_NUMBER'), 200)
+                logger.info("Card number entered")
+                time.sleep(1.5)
+
+                # Expiry Date Field
+                expiry_input = self.driver.find_element(By.XPATH,
+                                                        "/html/body/div[1]/div/div/div[1]/div/div/div/div/div/div/form/div/div/div[2]/div/div[1]/div/div/input"
+                                                        )
+                expiry_input.click()
+                simulate_typing(expiry_input, os.getenv('CARD_EXPIRY'), 200)
+                logger.info("Expiry date entered")
+                time.sleep(1.5)
+
+                # CVV Field
+                cvv_input = self.driver.find_element(By.XPATH,
+                                                     "/html/body/div[1]/div/div/div[1]/div/div/div/div/div/div/form/div/div/div[3]/div/div[1]/div/div[1]/input"
+                                                     )
+                cvv_input.click()
+                simulate_typing(cvv_input, os.getenv('CARD_CVC'), 200)
+                logger.info("CVV entered")
+
+                # Switch back to main content
+                self.driver.switch_to.default_content()
+                logger.info("Switched back to main content")
+
+                # Wait for Stripe to process
+                time.sleep(2)
+
+                # Find and scroll to place order button
+                place_order_btn = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located(
+                        (By.ID, "place-order-trigger"))
+                )
+
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                    place_order_btn
+                )
+                logger.info("Scrolled to place order button")
+
+                # Wait for manual verification and click
+                logger.info(
+                    "Waiting 30 seconds for manual verification and click...")
+                time.sleep(30)
+
+                return True
+
+            except Exception as e:
+                logger.error(f"Error filling card details: {str(e)}")
+                raise
+
         except Exception as e:
-            logger.error(f"Error in handle_payment: {str(e)}")
+            logger.error(f"Payment handling error: {str(e)}")
             return False
+
+        finally:
+            try:
+                self.driver.switch_to.default_content()
+                logger.info("Ensured return to main content")
+            except:
+                pass
+
+    # def handle_order_placement(self) -> bool:
+    #     """Handle the final review and order placement."""
+    #     try:
+    #         logger.info("Proceeding to place order...")
+
+    #         # Click the place order button
+    #         if not self._wait_and_click(
+    #             By.CSS_SELECTOR,
+    #             "button.btn.btn-l.is-submit.jp-place-order"
+    #         ):
+    #             return False
+
+    #         logger.info("Order placed successfully")
+    #         return True
+
+    #     except Exception as e:
+    #         logger.error(f"Error in order placement: {str(e)}")
+    #        return False
 
     def run_checkout(self) -> bool:
         """Execute the complete checkout process."""
@@ -330,7 +494,8 @@ class CasioCheckoutAutomation:
                 self.add_to_cart,
                 self.handle_login,
                 self.fill_checkout_details,
-                self.handle_payment
+                self.handle_payment,
+                # self.handle_order_placement
             ]
 
             for step in steps:
@@ -348,32 +513,40 @@ class CasioCheckoutAutomation:
             return False
         finally:
             if self.driver and not self.keep_browser_open and not self.error_occurred:
-                self.driver.quit()
+                # self.driver.quit()
+                try:
+                    while True:
+                        pass
+                except KeyboardInterrupt:
+                    self.driver.quit()
+                print("keep browser open")
             elif self.error_occurred:
                 logger.info(
                     "Keeping browser open due to error for debugging...")
 
 
 def main():
-    product_url = "https://www.casio.com/sg/watches/gshock/product.DW-5610UU-3/"
+    product_url = "https://www.casio.com/sg/watches/casio/product.CA-53WB-8B/"
     automation = CasioCheckoutAutomation(
         product_url=product_url,
         headless=False  # Set to True for headless mode
     )
 
-    try:
-        success = automation.run_checkout()
-        if success:
-            logger.info("Checkout automation completed successfully")
-        else:
-            logger.error("Checkout automation failed")
-    except KeyboardInterrupt:
-        logger.info("Automation stopped by user")
-    except Exception as e:
-        logger.error(f"Automation failed with error: {str(e)}")
-    # finally:
-    #     if automation.driver:
-    #         automation.driver.quit()
+    while True:
+        try:
+            success = automation.run_checkout()
+            if success:
+                logger.info("Checkout automation completed successfully")
+
+            else:
+                logger.error("Checkout automation failed")
+        except KeyboardInterrupt:
+            logger.info("Automation stopped by user")
+        except Exception as e:
+            logger.error(f"Automation failed with error: {str(e)}")
+        # finally:
+        #     if automation.driver:
+        #         automation.driver.quit()
 
 
 if __name__ == "__main__":
