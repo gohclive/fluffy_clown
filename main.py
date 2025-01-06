@@ -368,7 +368,7 @@ class CasioCheckoutAutomation:
                         checkbox.checked = true;
                         checkbox.dispatchEvent(new Event('change', { bubbles: true }));
                     """, checkbox)
-                time.sleep(1)
+                time.sleep(0.5)
                 logger.info("Billing checkbox handled")
             except Exception as e:
                 logger.warning(f"Billing checkbox handling failed: {str(e)}")
@@ -422,8 +422,9 @@ class CasioCheckoutAutomation:
                                                      "/html/body/div[1]/div/div/div[1]/div/div/div/div/div/div/form/div/div/div[3]/div/div[1]/div/div[1]/input"
                                                      )
                 cvv_input.click()
-                simulate_typing(cvv_input, os.getenv('CARD_CVC'), 200)
+                simulate_typing(cvv_input, os.getenv('CARD_CVC'), 220)
                 logger.info("CVV entered")
+                time.sleep(1.5)
 
                 # Switch back to main content
                 self.driver.switch_to.default_content()
@@ -431,23 +432,6 @@ class CasioCheckoutAutomation:
 
                 # Wait for Stripe to process
                 time.sleep(2)
-
-                # Find and scroll to place order button
-                place_order_btn = WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located(
-                        (By.ID, "place-order-trigger"))
-                )
-
-                self.driver.execute_script(
-                    "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
-                    place_order_btn
-                )
-                logger.info("Scrolled to place order button")
-
-                # Wait for manual verification and click
-                logger.info(
-                    "Waiting 30 seconds for manual verification and click...")
-                time.sleep(30)
 
                 return True
 
@@ -529,24 +513,25 @@ def main():
     product_url = "https://www.casio.com/sg/watches/casio/product.CA-53WB-8B/"
     automation = CasioCheckoutAutomation(
         product_url=product_url,
-        headless=False  # Set to True for headless mode
+        headless=False
     )
 
-    while True:
-        try:
-            success = automation.run_checkout()
-            if success:
-                logger.info("Checkout automation completed successfully")
-
-            else:
-                logger.error("Checkout automation failed")
-        except KeyboardInterrupt:
-            logger.info("Automation stopped by user")
-        except Exception as e:
-            logger.error(f"Automation failed with error: {str(e)}")
-        # finally:
-        #     if automation.driver:
-        #         automation.driver.quit()
+    try:
+        success = automation.run_checkout()
+        if success:
+            logger.info("Checkout automation completed successfully")
+            while True:  # Keep browser open
+                pass
+        else:
+            logger.error("Checkout automation failed")
+    except KeyboardInterrupt:
+        logger.info("Automation stopped by user")
+    except Exception as e:
+        logger.error(f"Automation failed with error: {str(e)}")
+    finally:
+        user_input = input("Close browser? (y/n): ")
+        if user_input.lower() == 'y' and automation.driver:
+            automation.driver.quit()
 
 
 if __name__ == "__main__":
